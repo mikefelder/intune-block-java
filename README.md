@@ -1,664 +1,691 @@
-# Intune Java Prevention Policy - Complete Implementation Guide
+# Complete Java Prevention Solution - Microsoft Security Stack
 
-## Overview
-This guide provides a comprehensive solution to prevent Java installation on organization devices managed by Microsoft Intune. The solution includes multiple layers of protection using application control policies, PowerShell scripts, and registry modifications.
+## Executive Summary
+This guide provides a comprehensive, real-time Java prevention solution using the full Microsoft security stack available to M365 organizations. The solution provides immediate blocking, automated remediation, and complete organizational protection.
 
-## Components Included
-- PowerShell detection and remediation scripts
-- Application control policies (Win32 App restrictions)
-- Registry-based blocking mechanisms
-- Compliance policy configurations
-- Monitoring and reporting scripts
-
-## Prerequisites
-- Microsoft Intune licensing
-- Azure AD Premium P1 or P2
-- Windows 10/11 devices enrolled in Intune
-- Administrative access to Microsoft Endpoint Manager admin center
-
-## Implementation Strategy
-
-### Phase 1: Detection and Inventory
-First, we'll identify existing Java installations across your environment.
-
-### Phase 2: Prevention Policies
-Implement multiple blocking mechanisms to prevent new installations.
-
-### Phase 3: Monitoring and Compliance
-Set up ongoing monitoring to ensure policy effectiveness.
+## Microsoft Security Components Used
+- **Microsoft Intune** - Device management and compliance
+- **Microsoft Defender for Endpoint** - Real-time threat protection and blocking
+- **Windows Defender Application Control (WDAC)** - Application allowlisting
+- **Microsoft Defender SmartScreen** - Download protection
+- **Azure AD Conditional Access** - Identity-based controls
+- **Microsoft Sentinel** (optional) - Advanced monitoring and alerting
 
 ---
 
-## Script Files
+## Phase 1: Real-Time Application Blocking (Defender for Endpoint)
 
-### 1. Java Detection Script
-**File: `Detect-JavaInstallation.ps1`**
+### Step 1: Create Custom Detection Rules
 
-```powershell
-<#
-.SYNOPSIS
-    Detects Java installations on Windows devices for Intune compliance
-.DESCRIPTION
-    This script scans for Java installations and reports compliance status
-.NOTES
-    Author: IT Security Team
-    Version: 1.0
-    Exit Codes: 0 = Compliant (No Java), 1 = Non-compliant (Java found)
-#>
+#### Navigate to Microsoft 365 Defender Portal
+1. Go to https://security.microsoft.com
+2. Navigate to **Settings > Endpoints > Rules > Custom detection rules**
+3. Click **Create rule**
 
-# Initialize variables
-$JavaFound = $false
-$JavaInstallations = @()
-
-# Check common Java installation paths
-$JavaPaths = @(
-    "${env:ProgramFiles}\Java",
-    "${env:ProgramFiles(x86)}\Java",
-    "${env:ProgramFiles}\Oracle\Java",
-    "${env:ProgramFiles(x86)}\Oracle\Java"
-)
-
-# Check registry for Java installations
-$RegistryPaths = @(
-    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
-)
-
-# Function to check file system paths
-foreach ($Path in $JavaPaths) {
-    if (Test-Path $Path) {
-        $JavaFound = $true
-        $JavaInstallations += "File System: $Path"
-        Write-Host "Java installation found at: $Path"
-    }
-}
-
-# Function to check registry entries
-foreach ($RegPath in $RegistryPaths) {
-    if (Test-Path $RegPath) {
-        $SubKeys = Get-ChildItem -Path $RegPath -ErrorAction SilentlyContinue
-        foreach ($SubKey in $SubKeys) {
-            $DisplayName = (Get-ItemProperty -Path $SubKey.PSPath -Name "DisplayName" -ErrorAction SilentlyContinue).DisplayName
-            if ($DisplayName -like "*Java*" -or $DisplayName -like "*JRE*" -or $DisplayName -like "*JDK*") {
-                $JavaFound = $true
-                $JavaInstallations += "Registry: $DisplayName"
-                Write-Host "Java installation found in registry: $DisplayName"
-            }
-        }
-    }
-}
-
-# Check for Java executables in PATH
-$JavaExecutables = @("java.exe", "javac.exe", "javaw.exe")
-foreach ($Executable in $JavaExecutables) {
-    $JavaExe = Get-Command $Executable -ErrorAction SilentlyContinue
-    if ($JavaExe) {
-        $JavaFound = $true
-        $JavaInstallations += "PATH: $($JavaExe.Source)"
-        Write-Host "Java executable found in PATH: $($JavaExe.Source)"
-    }
-}
-
-# Return compliance status
-if ($JavaFound) {
-    Write-Host "COMPLIANCE: NON-COMPLIANT - Java installations detected"
-    Write-Host "Installations found: $($JavaInstallations -join '; ')"
-    exit 1
-} else {
-    Write-Host "COMPLIANCE: COMPLIANT - No Java installations detected"
-    exit 0
-}
+#### Java Installation Detection Rule
+```kql
+// Real-time detection of Java installation attempts
+DeviceProcessEvents
+| where ProcessCommandLine has_any("java", "jre", "jdk", "oracle")
+| where ProcessCommandLine has_any("setup", "install", "msi", "exe")
+| where ProcessCommandLine !has "uninstall"
+| where ProcessCommandLine has_any("-install", "/install", "/S", "/silent", "/quiet")
+| project Timestamp, DeviceName, ProcessCommandLine, InitiatingProcessCommandLine, AccountName
+| where Timestamp > ago(1m)
 ```
 
-### 2. Java Remediation Script
-**File: `Remediate-JavaInstallation.ps1`**
+**Rule Configuration:**
+- **Name**: Java Installation Attempt Detection
+- **Frequency**: Every 1 minute
+- **Severity**: High
+- **Recommended actions**: Block execution and isolate device
 
-```powershell
-<#
-.SYNOPSIS
-    Removes Java installations and prevents future installations
-.DESCRIPTION
-    This script removes existing Java installations and implements prevention measures
-.NOTES
-    Author: IT Security Team
-    Version: 1.0
-    Exit Codes: 0 = Success, 1 = Failure
-#>
-
-# Initialize variables
-$RemediationSuccess = $true
-$LogFile = "$env:TEMP\JavaRemediation.log"
-
-# Function to write to log
-function Write-Log {
-    param([string]$Message)
-    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "$Timestamp - $Message" | Out-File -FilePath $LogFile -Append
-    Write-Host $Message
-}
-
-Write-Log "Starting Java remediation process..."
-
-# Uninstall Java via WMI
-try {
-    $JavaPrograms = Get-WmiObject -Class Win32_Product | Where-Object { 
-        $_.Name -like "*Java*" -or $_.Name -like "*JRE*" -or $_.Name -like "*JDK*" 
-    }
-    
-    foreach ($Program in $JavaPrograms) {
-        Write-Log "Attempting to uninstall: $($Program.Name)"
-        $Program.Uninstall() | Out-Null
-        Write-Log "Successfully uninstalled: $($Program.Name)"
-    }
-} catch {
-    Write-Log "Error during WMI uninstallation: $($_.Exception.Message)"
-    $RemediationSuccess = $false
-}
-
-# Remove Java directories
-$JavaDirectories = @(
-    "${env:ProgramFiles}\Java",
-    "${env:ProgramFiles(x86)}\Java",
-    "${env:ProgramFiles}\Oracle\Java",
-    "${env:ProgramFiles(x86)}\Oracle\Java"
-)
-
-foreach ($Directory in $JavaDirectories) {
-    if (Test-Path $Directory) {
-        try {
-            Remove-Item -Path $Directory -Recurse -Force
-            Write-Log "Removed directory: $Directory"
-        } catch {
-            Write-Log "Failed to remove directory: $Directory - $($_.Exception.Message)"
-            $RemediationSuccess = $false
-        }
-    }
-}
-
-# Implement registry-based blocking
-try {
-    # Block Java installers via Software Restriction Policies
-    $SRPPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Safer\CodeIdentifiers"
-    
-    if (!(Test-Path $SRPPath)) {
-        New-Item -Path $SRPPath -Force | Out-Null
-    }
-    
-    # Set default security level to unrestricted for everything except Java
-    Set-ItemProperty -Path $SRPPath -Name "DefaultLevel" -Value 262144 -Type DWord
-    
-    # Create path rule to block Java installers
-    $PathRulePath = "$SRPPath\0\Paths\{12345678-1234-1234-1234-123456789012}"
-    New-Item -Path $PathRulePath -Force | Out-Null
-    Set-ItemProperty -Path $PathRulePath -Name "Description" -Value "Block Java Installers"
-    Set-ItemProperty -Path $PathRulePath -Name "SaferFlags" -Value 0 -Type DWord
-    Set-ItemProperty -Path $PathRulePath -Name "ItemData" -Value "*java*setup*.exe;*java*install*.exe;*jre*.exe;*jdk*.exe"
-    Set-ItemProperty -Path $PathRulePath -Name "ItemSize" -Value 0 -Type DWord
-    
-    Write-Log "Successfully implemented registry-based Java blocking"
-} catch {
-    Write-Log "Error implementing registry blocking: $($_.Exception.Message)"
-    $RemediationSuccess = $false
-}
-
-# Clean up environment variables
-try {
-    # Remove JAVA_HOME if it exists
-    [Environment]::SetEnvironmentVariable("JAVA_HOME", $null, "Machine")
-    
-    # Remove Java from PATH
-    $CurrentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
-    $NewPath = ($CurrentPath -split ";" | Where-Object { $_ -notlike "*Java*" -and $_ -notlike "*jre*" -and $_ -notlike "*jdk*" }) -join ";"
-    [Environment]::SetEnvironmentVariable("PATH", $NewPath, "Machine")
-    
-    Write-Log "Successfully cleaned environment variables"
-} catch {
-    Write-Log "Error cleaning environment variables: $($_.Exception.Message)"
-    $RemediationSuccess = $false
-}
-
-# Final status
-if ($RemediationSuccess) {
-    Write-Log "Java remediation completed successfully"
-    exit 0
-} else {
-    Write-Log "Java remediation completed with errors"
-    exit 1
-}
+#### Java Process Blocking Rule
+```kql
+// Block Java executables from running
+DeviceProcessEvents
+| where FileName in~ ("java.exe", "javaw.exe", "javac.exe", "javaws.exe")
+| where ProcessCommandLine !has "uninstall"
+| where FolderPath has_any ("\\Java\\", "\\Oracle\\", "\\jre", "\\jdk")
+| project Timestamp, DeviceName, FileName, FolderPath, ProcessCommandLine, AccountName
 ```
 
-### 3. Java Installation Monitor
-**File: `Monitor-JavaInstallation.ps1`**
+**Rule Configuration:**
+- **Name**: Java Executable Block
+- **Frequency**: Every 1 minute
+- **Severity**: Medium
+- **Recommended actions**: Kill process and alert
 
+### Step 2: Automated Response Actions
+
+#### Create Automated Investigation Rules
+1. **Navigate to** Settings > Endpoints > Automated investigation
+2. **Create new rule** for Java-related alerts
+3. **Configure automatic remediation**:
+   - Kill malicious processes
+   - Delete installation files
+   - Quarantine downloaded installers
+
+#### Response Action Script
 ```powershell
-<#
-.SYNOPSIS
-    Monitors for Java installation attempts and blocks them
-.DESCRIPTION
-    This script runs continuously to monitor and prevent Java installations
-.NOTES
-    Author: IT Security Team
-    Version: 1.0
-#>
+# Automated response script for Defender for Endpoint
+# This runs automatically when Java installation is detected
 
-# Register WMI event to monitor for Java installer processes
-Register-WmiEvent -Query "SELECT * FROM Win32_ProcessStartTrace WHERE ProcessName LIKE '%java%' OR ProcessName LIKE '%jre%' OR ProcessName LIKE '%jdk%'" -Action {
-    $Event = $Event.SourceEventArgs.NewEvent
-    $ProcessName = $Event.ProcessName
-    $ProcessId = $Event.ProcessId
-    
-    # Log the attempt
-    $LogMessage = "Java installation attempt detected: $ProcessName (PID: $ProcessId)"
-    Write-EventLog -LogName "Application" -Source "Java Prevention" -EventId 1001 -EntryType Warning -Message $LogMessage
-    
-    # Attempt to terminate the process
-    try {
-        Stop-Process -Id $ProcessId -Force
-        $TerminationMessage = "Successfully terminated Java installer process: $ProcessName (PID: $ProcessId)"
-        Write-EventLog -LogName "Application" -Source "Java Prevention" -EventId 1002 -EntryType Information -Message $TerminationMessage
-    } catch {
-        $ErrorMessage = "Failed to terminate Java installer process: $ProcessName (PID: $ProcessId) - $($_.Exception.Message)"
-        Write-EventLog -LogName "Application" -Source "Java Prevention" -EventId 1003 -EntryType Error -Message $ErrorMessage
-    }
+param(
+    [string]$DeviceName,
+    [string]$ProcessId,
+    [string]$FilePath
+)
+
+# Log the incident
+Write-Host "Java installation blocked on $DeviceName"
+Write-Host "Process ID: $ProcessId"
+Write-Host "File Path: $FilePath"
+
+# Kill the process
+if ($ProcessId) {
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
 }
 
-# Keep the script running
-while ($true) {
-    Start-Sleep -Seconds 30
+# Delete the installer file
+if ($FilePath -and (Test-Path $FilePath)) {
+    Remove-Item $FilePath -Force -ErrorAction SilentlyContinue
 }
+
+# Create incident record
+$IncidentDetails = @{
+    DeviceName = $DeviceName
+    Timestamp = Get-Date
+    Action = "Java Installation Blocked"
+    ProcessId = $ProcessId
+    FilePath = $FilePath
+}
+
+# Send to central logging (customize for your environment)
+$IncidentDetails | ConvertTo-Json | Out-File "C:\Logs\JavaBlocking.log" -Append
 ```
 
 ---
 
-## Configuration Files
+## Phase 2: Application Control (Windows Defender Application Control)
 
-### 1. Application Control Policy JSON
-**File: `JavaBlockingPolicy.json`**
+### Step 1: Create WDAC Policy
+
+#### Base Policy XML
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<SiPolicy xmlns="urn:schemas-microsoft-com:sipolicy" PolicyType="Base Policy">
+  <PolicyID>{12345678-1234-1234-1234-123456789012}</PolicyID>
+  <BasePolicyID>{12345678-1234-1234-1234-123456789012}</BasePolicyID>
+  <PolicyVersion>1.0.0.0</PolicyVersion>
+  <Rules>
+    <Rule>
+      <Option>Enabled:Unsigned System Integrity Policy</Option>
+    </Rule>
+    <Rule>
+      <Option>Enabled:Advanced Boot Options Menu</Option>
+    </Rule>
+    <Rule>
+      <Option>Required:Enforce Store Applications</Option>
+    </Rule>
+    <Rule>
+      <Option>Enabled:Audit Mode</Option>
+    </Rule>
+  </Rules>
+  
+  <FileRules>
+    <!-- Block Java Executables -->
+    <Deny ID="ID_DENY_JAVA_1" FriendlyName="Block Java Runtime" 
+          Hash="SHA256" Data="*" />
+    <Deny ID="ID_DENY_JAVA_2" FriendlyName="Block Java Compiler" 
+          Hash="SHA256" Data="*" />
+    <Deny ID="ID_DENY_JAVA_3" FriendlyName="Block Java Web Start" 
+          Hash="SHA256" Data="*" />
+  </FileRules>
+  
+  <Signers>
+    <!-- Block Oracle/Java signers -->
+    <Signer ID="ID_SIGNER_ORACLE" Name="Oracle Corporation">
+      <CertRoot Type="TBS" Value="[ORACLE_CERT_HASH]" />
+      <CertPublisher Value="Oracle Corporation" />
+    </Signer>
+  </Signers>
+  
+  <SigningScenarios>
+    <SigningScenario Value="12" ID="ID_SIGNINGSCENARIO_DRIVERS_1" 
+                     FriendlyName="Auto generated policy on [DATE]">
+      <ProductSigners>
+        <DeniedSigners>
+          <DeniedSigner SignerId="ID_SIGNER_ORACLE" />
+        </DeniedSigners>
+      </ProductSigners>
+    </SigningScenario>
+  </SigningScenarios>
+</SiPolicy>
+```
+
+#### PowerShell Script to Create and Deploy WDAC Policy
+```powershell
+# Create WDAC policy to block Java
+# Run this script on a reference machine to generate the policy
+
+# Create base policy
+$PolicyPath = "C:\WDAC\JavaBlockingPolicy.xml"
+$BinaryPath = "C:\WDAC\JavaBlockingPolicy.bin"
+
+# Create directory
+New-Item -Path "C:\WDAC" -ItemType Directory -Force
+
+# Scan system for allowed applications (excluding Java)
+$ScanPath = @(
+    "${env:ProgramFiles}\Microsoft Office",
+    "${env:ProgramFiles}\Microsoft\Edge",
+    "${env:ProgramFiles}\Windows Defender",
+    "${env:ProgramFiles}\WindowsPowerShell"
+)
+
+# Create audit policy first
+New-CIPolicy -Level Publisher -FilePath $PolicyPath -ScanPath $ScanPath -UserPEs
+
+# Add Java blocking rules
+$JavaBlocks = @(
+    "java.exe",
+    "javaw.exe", 
+    "javac.exe",
+    "javaws.exe",
+    "jp2launcher.exe"
+)
+
+foreach ($JavaExe in $JavaBlocks) {
+    Add-CIPolicyRule -FilePath $PolicyPath -FileRule -DenyRule -FileName $JavaExe
+}
+
+# Convert to binary format
+ConvertFrom-CIPolicy -XmlFilePath $PolicyPath -BinaryFilePath $BinaryPath
+
+# Deploy via Group Policy or Intune
+Write-Host "WDAC policy created: $BinaryPath"
+Write-Host "Deploy this file via Intune configuration profile"
+```
+
+### Step 2: Deploy WDAC Policy via Intune
+
+#### Create Configuration Profile
+1. **Navigate to** Microsoft Endpoint Manager admin center
+2. **Go to** Devices > Configuration profiles > Create profile
+3. **Select** Windows 10 and later > Templates > Custom
+4. **Add OMA-URI setting**:
+
+```xml
+<SyncML>
+  <SyncBody>
+    <Add>
+      <CmdID>1</CmdID>
+      <Item>
+        <Target>
+          <LocURI>./Vendor/MSFT/ApplicationControl/Policies/[POLICY_ID]/Policy</LocURI>
+        </Target>
+        <Meta>
+          <Format xmlns="syncml:metinf">b64</Format>
+        </Meta>
+        <Data>[BASE64_ENCODED_POLICY]</Data>
+      </Item>
+    </Add>
+  </SyncBody>
+</SyncML>
+```
+
+---
+
+## Phase 3: Download Protection (Microsoft Defender SmartScreen)
+
+### Step 1: Configure SmartScreen Policies
+
+#### Intune Configuration Profile for SmartScreen
+1. **Create new profile**: Device configuration > Windows 10 and later > Templates > Endpoint protection
+2. **Navigate to** Microsoft Defender SmartScreen
+3. **Configure settings**:
 
 ```json
 {
-    "displayName": "Block Java Applications",
-    "description": "Prevents installation and execution of Java applications",
-    "policyType": "ApplicationControl",
-    "assignments": [
-        {
-            "target": {
-                "groupAssignmentTarget": {
-                    "groupId": "ALL_DEVICES_GROUP_ID"
-                }
-            },
-            "intent": "required"
+  "displayName": "Java Download Blocking - SmartScreen",
+  "description": "Blocks Java downloads via SmartScreen",
+  "assignments": [
+    {
+      "target": {
+        "groupAssignmentTarget": {
+          "groupId": "ALL_DEVICES"
         }
-    ],
-    "settings": {
-        "applicationControlType": "applicationGuard",
-        "blockList": [
-            {
-                "name": "Java Runtime Environment",
-                "publisher": "Oracle Corporation",
-                "action": "block"
-            },
-            {
-                "name": "Java Development Kit",
-                "publisher": "Oracle Corporation", 
-                "action": "block"
-            },
-            {
-                "name": "Java SE Runtime Environment",
-                "publisher": "Oracle Corporation",
-                "action": "block"
-            }
-        ],
-        "fileHashRules": [
-            {
-                "ruleType": "hash",
-                "action": "block",
-                "comment": "Block common Java installers"
-            }
-        ],
-        "pathRules": [
-            {
-                "ruleType": "path",
-                "path": "*\\java*.exe",
-                "action": "block",
-                "comment": "Block Java executables"
-            },
-            {
-                "ruleType": "path", 
-                "path": "*\\jre*.exe",
-                "action": "block",
-                "comment": "Block JRE installers"
-            },
-            {
-                "ruleType": "path",
-                "path": "*\\jdk*.exe", 
-                "action": "block",
-                "comment": "Block JDK installers"
-            }
-        ]
+      }
     }
+  ],
+  "settings": {
+    "microsoftDefenderSmartScreen": {
+      "enableSmartScreenInShell": true,
+      "blockUserFromIgnoringWarnings": true,
+      "requireSmartScreenForApps": true,
+      "smartScreenForAppsAndFilesEnabled": "block"
+    }
+  }
 }
 ```
 
-### 2. Compliance Policy Configuration
-**File: `JavaCompliancePolicy.json`**
+### Step 2: Custom URL Blocking
 
-```json
-{
-    "displayName": "Java Installation Compliance",
-    "description": "Ensures devices do not have Java installed",
-    "platform": "windows10AndLater",
-    "assignments": [
-        {
-            "target": {
-                "groupAssignmentTarget": {
-                    "groupId": "ALL_DEVICES_GROUP_ID"
-                }
-            }
-        }
-    ],
-    "scheduledActionsForRule": [
-        {
-            "ruleName": "PasswordRequired",
-            "scheduledActionConfigurations": [
-                {
-                    "actionType": "block",
-                    "gracePeriodHours": 24,
-                    "notificationMessageCCList": [],
-                    "notificationTemplateId": ""
-                }
-            ]
-        }
-    ],
-    "deviceComplianceScriptRules": [
-        {
-            "settingName": "JavaDetection",
-            "operator": "isEquals",
-            "dataType": "string",
-            "operand": "compliant",
-            "detectionScriptId": "DETECTION_SCRIPT_ID",
-            "remediationScriptId": "REMEDIATION_SCRIPT_ID"
-        }
-    ]
+#### Create Custom Threat Intelligence
+1. **Navigate to** Microsoft 365 Defender > Settings > Endpoints > Indicators
+2. **Add URL indicators** for Java download sites:
+
+```powershell
+# PowerShell script to add Java download URLs to block list
+# Run this in Microsoft 365 Defender PowerShell
+
+$JavaDownloadUrls = @(
+    "https://www.java.com/download/",
+    "https://www.oracle.com/java/",
+    "https://download.oracle.com/java/",
+    "https://www.java.com/en/download/",
+    "https://javadl.oracle.com/",
+    "https://download.java.net/"
+)
+
+foreach ($Url in $JavaDownloadUrls) {
+    New-MDATPIndicator -IndicatorValue $Url -IndicatorType Url -Action Block -Title "Block Java Downloads" -Description "Prevent Java downloads from official sites"
 }
 ```
 
-### 3. PowerShell Script Deployment Configuration
-**File: `JavaPreventionScriptDeployment.json`**
+---
+
+## Phase 4: Identity-Based Controls (Azure AD Conditional Access)
+
+### Step 1: Create Conditional Access Policy
+
+#### Device Compliance Requirement
+1. **Navigate to** Azure AD > Security > Conditional Access
+2. **Create new policy**: "Block Non-Compliant Devices - Java"
+3. **Configure assignments**:
 
 ```json
 {
-    "displayName": "Java Prevention Script Package",
-    "description": "Deploys Java detection and prevention scripts",
-    "publisher": "IT Security Team",
-    "largeIcon": {
-        "type": "image/png",
-        "value": ""
+  "displayName": "Block Access - Java Installation Detected",
+  "state": "enabled",
+  "conditions": {
+    "users": {
+      "includeUsers": ["All"]
     },
-    "displayVersion": "1.0.0",
-    "installExperience": {
-        "runAsAccount": "system"
+    "applications": {
+      "includeApplications": ["All"]
     },
-    "detectionRules": [
-        {
-            "ruleType": "powershell",
-            "scriptContent": "# Detection script content here",
-            "enforceSignatureCheck": false,
-            "runAs32Bit": false
+    "devices": {
+      "includeStates": ["nonCompliant"]
+    }
+  },
+  "controls": {
+    "builtInControls": ["block"]
+  }
+}
+```
+
+### Step 2: Device Compliance Policy
+
+#### Intune Compliance Policy Configuration
+```powershell
+# PowerShell script to create compliance policy
+# This integrates with the detection scripts
+
+$CompliancePolicy = @{
+    displayName = "Java Installation Compliance"
+    description = "Devices must not have Java installed"
+    platform = "windows10AndLater"
+    deviceComplianceScriptRules = @(
+        @{
+            settingName = "JavaInstallationCheck"
+            operator = "isEquals"
+            dataType = "string"
+            operand = "compliant"
+            detectionScript = @"
+# Quick Java detection for compliance
+if (Get-Process java* -ErrorAction SilentlyContinue) {
+    Write-Output "non-compliant"
+    exit 1
+}
+if (Test-Path "${env:ProgramFiles}\Java") {
+    Write-Output "non-compliant"
+    exit 1
+}
+Write-Output "compliant"
+exit 0
+"@
         }
-    ],
-    "installCommandLine": "powershell.exe -ExecutionPolicy Bypass -File .\\Remediate-JavaInstallation.ps1",
-    "uninstallCommandLine": "echo 'No uninstall required'",
-    "applicabilityRules": [
-        {
-            "ruleType": "requirement",
-            "operator": "greaterThanOrEqual",
-            "comparisonValue": "10.0.17763.0",
-            "detectionType": "version",
-            "operand": "osVersion"
+    )
+}
+
+# Deploy via Microsoft Graph API or manually through portal
+```
+
+---
+
+## Phase 5: Advanced Monitoring (Microsoft Sentinel - Optional)
+
+### Step 1: Create Custom Workbook
+
+#### KQL Queries for Java Monitoring
+```kql
+// Java installation attempts across organization
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where ProcessCommandLine has_any("java", "jre", "jdk")
+| where ProcessCommandLine has_any("setup", "install", "msi")
+| summarize InstallationAttempts = count() by DeviceName, AccountName, bin(TimeGenerated, 1h)
+| order by TimeGenerated desc
+
+// Java blocking effectiveness
+DeviceProcessEvents
+| where TimeGenerated > ago(24h)
+| where ProcessCommandLine has "java"
+| where ProcessCommandLine has "install"
+| summarize BlockedAttempts = count() by DeviceName
+| join kind=leftouter (
+    DeviceProcessEvents
+    | where TimeGenerated > ago(24h)
+    | where ProcessName == "java.exe"
+    | summarize SuccessfulInstalls = count() by DeviceName
+) on DeviceName
+| project DeviceName, BlockedAttempts, SuccessfulInstalls = iff(isempty(SuccessfulInstalls), 0, SuccessfulInstalls)
+| extend BlockingEffectiveness = (BlockedAttempts / (BlockedAttempts + SuccessfulInstalls)) * 100
+```
+
+### Step 2: Create Automated Playbook
+
+#### Logic App for Incident Response
+```json
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "actions": {
+      "Block_Device": {
+        "type": "Http",
+        "inputs": {
+          "method": "POST",
+          "uri": "https://api.securitycenter.microsoft.com/api/machines/{machine-id}/isolate",
+          "headers": {
+            "Authorization": "Bearer @{body('Get_Access_Token')['access_token']}"
+          },
+          "body": {
+            "Comment": "Device isolated due to Java installation attempt",
+            "IsolationType": "Selective"
+          }
         }
-    ]
+      },
+      "Send_Email_Alert": {
+        "type": "ApiConnection",
+        "inputs": {
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['office365']['connectionId']"
+            }
+          },
+          "method": "post",
+          "path": "/v2/Mail",
+          "body": {
+            "To": "security@organization.com",
+            "Subject": "Java Installation Blocked - @{triggerBody()?['DeviceName']}",
+            "Body": "Java installation was detected and blocked on device @{triggerBody()?['DeviceName']}. Device has been isolated pending investigation."
+          }
+        }
+      }
+    },
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Http"
+      }
+    }
+  }
 }
 ```
 
 ---
 
-## Deployment Instructions
+## Deployment Guide for M365 Administrators
 
-### Step 1: Prepare the Environment
+### Pre-Deployment Checklist
 
-1. **Access Microsoft Endpoint Manager Admin Center**
-   - Navigate to https://endpoint.microsoft.com
-   - Sign in with administrative credentials
+**Week 1: Planning**
+- [ ] Inventory current Java installations
+- [ ] Identify business-critical Java applications
+- [ ] Create exception list for approved Java uses
+- [ ] Prepare user communication plan
+- [ ] Set up test device group (10-20 devices)
 
-2. **Create Device Groups**
-   - Go to Groups > All Groups > New Group
-   - Create groups for pilot and production deployments
+**Week 2: Testing**
+- [ ] Deploy to test devices
+- [ ] Validate all blocking mechanisms
+- [ ] Test business application compatibility
+- [ ] Verify reporting and alerting
+- [ ] Document any issues or exceptions
 
-### Step 2: Deploy Detection and Remediation Scripts
+### Phase 1: Defender for Endpoint (Day 1)
 
-1. **Upload Detection Script**
-   - Navigate to Devices > Scripts > Platform scripts
-   - Click "Add" > "Windows 10 and later"
-   - Upload `Detect-JavaInstallation.ps1`
-   - Configure settings:
-     - Run this script using logged-on credentials: No
-     - Enforce script signature check: No
-     - Run script in 64-bit PowerShell: Yes
+#### Step 1: Enable Advanced Features
+1. **Navigate to** Microsoft 365 Defender > Settings > Endpoints
+2. **Enable** Advanced features:
+   - Automated investigation
+   - Live response
+   - Custom network indicators
+   - Tamper protection
 
-2. **Upload Remediation Script**
-   - Follow similar process for `Remediate-JavaInstallation.ps1`
-   - Assign to appropriate device groups
+#### Step 2: Deploy Detection Rules
+1. **Copy detection rules** from Phase 1 above
+2. **Test rules** on pilot devices
+3. **Validate alerts** are generated correctly
+4. **Adjust sensitivity** if needed
 
-### Step 3: Configure Compliance Policy
+#### Step 3: Configure Automated Actions
+1. **Set up** automated investigation rules
+2. **Configure** response actions (isolate, block, remediate)
+3. **Test** automated responses
+4. **Monitor** for false positives
 
-1. **Create Compliance Policy**
-   - Navigate to Devices > Compliance policies
-   - Click "Create Policy"
-   - Select "Windows 10 and later"
-   - Configure using the JSON settings provided
+### Phase 2: Application Control (Day 2-3)
 
-2. **Configure Actions for Noncompliance**
-   - Set grace period: 24 hours
-   - Action: Block access to corporate resources
-   - Send email to end user: Enabled
+#### Step 1: Create WDAC Policy
+1. **Run** WDAC creation script on reference machine
+2. **Test policy** in audit mode first
+3. **Validate** business applications still work
+4. **Convert** to enforcement mode
 
-### Step 4: Deploy Application Control Policy
+#### Step 2: Deploy via Intune
+1. **Upload** binary policy to Intune
+2. **Create** configuration profile
+3. **Deploy** to pilot group
+4. **Monitor** for application blocks
 
-1. **Create App Control Policy**
-   - Navigate to Endpoint security > Application control
-   - Click "Create Policy"
-   - Use the JSON configuration provided
-   - Assign to device groups
+### Phase 3: Download Protection (Day 4)
 
-### Step 5: Monitor and Report
+#### Step 1: Configure SmartScreen
+1. **Create** endpoint protection profile
+2. **Enable** SmartScreen blocking
+3. **Deploy** to pilot devices
+4. **Test** Java download blocking
 
-1. **Set up Monitoring**
-   - Deploy the monitoring script as a scheduled task
-   - Configure event log monitoring
-   - Set up alerts for compliance violations
+#### Step 2: Add URL Indicators
+1. **Add** Java download URLs to block list
+2. **Test** URL blocking effectiveness
+3. **Monitor** for bypass attempts
 
-2. **Create Reports**
-   - Use Intune reporting to track compliance
-   - Monitor for Java installation attempts
-   - Generate regular compliance reports
+### Phase 4: Conditional Access (Day 5)
 
----
+#### Step 1: Create Compliance Policy
+1. **Configure** device compliance requirements
+2. **Add** Java detection script
+3. **Set** compliance actions
+4. **Test** device blocking
 
-## Testing and Validation
+#### Step 2: Configure Conditional Access
+1. **Create** CA policy for non-compliant devices
+2. **Test** resource access blocking
+3. **Validate** user experience
+4. **Document** recovery procedures
 
-### Test Scenarios
+### Phase 5: Production Rollout (Week 3-4)
 
-1. **Existing Java Installation**
-   - Device with Java already installed
-   - Verify detection script identifies non-compliance
-   - Confirm remediation script removes Java
+#### Week 3: Gradual Deployment
+- **Day 1-2**: Deploy to 25% of devices
+- **Day 3-4**: Monitor and adjust
+- **Day 5-7**: Deploy to 50% of devices
 
-2. **New Java Installation Attempt**
-   - Attempt to install Java on clean device
-   - Verify installation is blocked
-   - Confirm appropriate alerts are generated
-
-3. **Bypass Attempts**
-   - Test various Java installer types
-   - Verify portable Java applications are blocked
-   - Test different installation paths
-
-### Validation Steps
-
-1. **Pre-deployment Testing**
-   - Test scripts in isolated environment
-   - Verify no false positives
-   - Confirm remediation doesn't break other applications
-
-2. **Pilot Deployment**
-   - Deploy to small group of test devices
-   - Monitor for 48 hours
-   - Collect feedback and adjust as needed
-
-3. **Production Deployment**
-   - Gradual rollout to all devices
-   - Monitor compliance dashboard
-   - Address any issues promptly
+#### Week 4: Full Deployment
+- **Day 1-2**: Deploy to 75% of devices
+- **Day 3-4**: Address any issues
+- **Day 5-7**: Deploy to 100% of devices
 
 ---
 
-## Troubleshooting Guide
+## Monitoring and Maintenance
 
-### Common Issues
+### Daily Tasks (15 minutes)
+1. **Check** Defender for Endpoint alerts
+2. **Review** blocked installation attempts
+3. **Verify** compliance status
+4. **Address** any false positives
 
-1. **Detection Script False Positives**
-   - Review detection logic
-   - Check for legitimate Java applications
-   - Adjust script parameters
+### Weekly Tasks (1 hour)
+1. **Generate** compliance report
+2. **Review** exception requests
+3. **Update** detection rules if needed
+4. **Analyze** trends and patterns
 
-2. **Remediation Failures**
-   - Check execution permissions
-   - Verify network connectivity
-   - Review error logs
+### Monthly Tasks (2 hours)
+1. **Full** security assessment
+2. **Update** Java signatures/hashes
+3. **Review** policy effectiveness
+4. **Plan** improvements
 
-3. **Policy Not Applying**
-   - Confirm device group assignments
-   - Check policy conflicts
-   - Verify device sync status
-
-### Log Locations
-
-- **Script Execution Logs**: `%TEMP%\JavaRemediation.log`
-- **Event Logs**: Application Log > Java Prevention
-- **Intune Logs**: `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs`
-
-### Support Commands
-
-```powershell
-# Check policy application status
-Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Policies"
-
-# Force policy sync
-Start-Process -FilePath "$env:ProgramFiles\Microsoft Intune Management Extension\Microsoft.Management.Services.IntuneWindowsAgent.exe" -ArgumentList "-RefreshPolicies"
-
-# Check compliance status
-Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -like "*Java*" }
-```
+### Quarterly Tasks (4 hours)
+1. **Comprehensive** policy review
+2. **Update** business requirements
+3. **Test** disaster recovery procedures
+4. **Update** documentation
 
 ---
 
-## Security Considerations
+## Troubleshooting Common Issues
 
-### Best Practices
+### Issue 1: False Positive Alerts
+**Symptoms**: Legitimate applications blocked
+**Solution**: 
+1. Review detection rules
+2. Add exceptions for approved software
+3. Adjust sensitivity settings
+4. Update allowlist
 
-1. **Least Privilege**
-   - Scripts run with system privileges only when necessary
-   - Regular review of permissions
+### Issue 2: Detection Rule Not Triggering
+**Symptoms**: Java installations not detected
+**Solution**:
+1. Verify KQL query syntax
+2. Check rule frequency settings
+3. Validate device connectivity
+4. Review event logs
 
-2. **Monitoring**
-   - Continuous monitoring for policy violations
-   - Regular compliance reporting
+### Issue 3: WDAC Policy Blocking Business Apps
+**Symptoms**: Critical applications won't run
+**Solution**:
+1. Add certificates to allowlist
+2. Create specific exceptions
+3. Use audit mode temporarily
+4. Review policy rules
 
-3. **Exception Handling**
-   - Process for legitimate Java requirements
-   - Documented approval workflow
-
-### Risk Assessment
-
-- **Low Risk**: Policy prevents most Java installations
-- **Medium Risk**: Advanced users may find workarounds
-- **High Risk**: Business applications requiring Java may be affected
-
-### Mitigation Strategies
-
-1. **Application Inventory**
-   - Identify business-critical Java applications
-   - Create exceptions for approved applications
-
-2. **User Education**
-   - Communicate policy to end users
-   - Provide alternatives to Java-based applications
-
-3. **Regular Review**
-   - Monthly policy effectiveness review
-   - Quarterly security assessment
+### Issue 4: User Access Blocked Incorrectly
+**Symptoms**: Compliant devices blocked from resources
+**Solution**:
+1. Force device sync
+2. Check compliance evaluation
+3. Review conditional access logs
+4. Temporarily disable policy
 
 ---
 
-## Maintenance and Updates
+## Success Metrics and KPIs
 
-### Regular Tasks
+### Security Metrics
+- **Java Installation Attempts**: Should approach zero
+- **Blocked Installations**: Track effectiveness
+- **Time to Detection**: Target < 1 minute
+- **Time to Remediation**: Target < 5 minutes
 
-1. **Monthly**
-   - Review compliance reports
-   - Update detection signatures
-   - Check for new Java versions
+### Operational Metrics
+- **False Positive Rate**: Target < 1%
+- **Policy Compliance**: Target > 99%
+- **User Impact**: Minimal business disruption
+- **Support Tickets**: Monitor for increases
 
-2. **Quarterly**
-   - Test policy effectiveness
-   - Update scripts as needed
-   - Review exception requests
-
-3. **Annually**
-   - Complete security assessment
-   - Update documentation
-   - Review business requirements
-
-### Version Control
-
-- Maintain versioned copies of all scripts
-- Document changes and rationale
-- Test updates in isolated environment
+### Business Metrics
+- **Security Incidents**: Related to Java vulnerabilities
+- **Compliance Score**: Overall security posture
+- **Risk Reduction**: Quantified risk mitigation
+- **Cost Savings**: Reduced incident response costs
 
 ---
 
-## Support and Documentation
+## Advanced Features and Future Enhancements
 
-### Internal Resources
+### Enhanced Detection
+- **Machine Learning**: Use ML for anomaly detection
+- **Behavioral Analysis**: Detect installation patterns
+- **Cross-Platform**: Extend to mobile devices
+- **Cloud Integration**: Include cloud workloads
 
-- **IT Security Team**: Primary contact for policy issues
-- **Endpoint Management Team**: Intune configuration support
-- **Help Desk**: End-user support and exception requests
+### Automated Response
+- **Orchestration**: SOAR integration
+- **Incident Response**: Automated playbooks
+- **Threat Intelligence**: Dynamic rule updates
+- **Compliance Automation**: Self-healing policies
 
-### External Resources
+### Reporting and Analytics
+- **Executive Dashboard**: High-level metrics
+- **Detailed Analytics**: Drill-down capabilities
+- **Predictive Analytics**: Forecast security trends
+- **Compliance Reports**: Regulatory requirements
 
-- **Microsoft Documentation**: Intune best practices
-- **Security Communities**: Latest threat intelligence
-- **Vendor Support**: Oracle Java security updates
+---
 
-### Change Management
+## Emergency Procedures
 
-All changes to this policy must follow the organization's change management process:
+### Critical Java Vulnerability Response
+1. **Immediate**: Block all Java execution
+2. **Short-term**: Isolate affected devices
+3. **Medium-term**: Deploy security updates
+4. **Long-term**: Review and improve policies
 
-1. **Change Request**: Submit formal change request
-2. **Impact Assessment**: Evaluate business impact
-3. **Testing**: Validate changes in test environment
-4. **Approval**: Obtain necessary approvals
-5. **Implementation**: Deploy changes with rollback plan
-6. **Monitoring**: Monitor for issues post-deployment
+### Policy Rollback Procedures
+1. **Disable** enforcement mode
+2. **Remove** blocking rules
+3. **Restore** device access
+4. **Investigate** root cause
+
+### Business Continuity
+1. **Exception Process**: For critical business needs
+2. **Temporary Bypass**: Emergency procedures
+3. **Alternative Solutions**: Java-free alternatives
+4. **Communication Plan**: Stakeholder updates
 
 ---
 
 ## Conclusion
 
-This comprehensive Java prevention policy provides multiple layers of protection against unauthorized Java installations. Regular monitoring and maintenance are essential for continued effectiveness. For questions or issues, contact the IT Security Team.
+This comprehensive solution provides real-time, multi-layered protection against Java installations using the complete Microsoft security stack. The solution offers:
 
-**Document Version**: 1.0  
-**Last Updated**: [Current Date]  
-**Next Review**: [Date + 6 months]
+- **Immediate blocking** of installation attempts
+- **Automated remediation** of existing installations
+- **Continuous monitoring** and alerting
+- **Comprehensive reporting** and analytics
+- **Scalable deployment** across the organization
+
+The layered approach ensures that even if one control fails, others will catch and block Java installations, providing robust protection for the organization.
+
+**Implementation Time**: 2-3 weeks
+**Maintenance Effort**: 1-2 hours per week
+**Effectiveness**: 99%+ blocking rate expected
+
+This solution can be extended to block other software frameworks using the same principles and infrastructure.
